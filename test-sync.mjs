@@ -1,5 +1,7 @@
 import { syncCaps } from './dsh-model-caps-sync.js'
 
+process.env.HTTPS_PROXY = 'http://proxy.test:9'
+
 const results = []
 function check(label, actual, expected) {
   const ok = JSON.stringify(actual) === JSON.stringify(expected)
@@ -40,7 +42,7 @@ const result = await syncCaps({
   credentials,
   timeoutMs: 1000,
   fetch: async (url, init) => {
-    calls.push({ url: String(url), authorization: init.headers?.authorization, apiKey: init.headers?.['x-api-key'] })
+    calls.push({ url: String(url), authorization: init.headers?.authorization, apiKey: init.headers?.['x-api-key'], proxy: init.proxy })
     if (String(url).includes('models.dev')) {
       return {
         ok: true,
@@ -74,6 +76,7 @@ check('the blank model gained catalog caps', mutations[0].models[0], {
 })
 check('the hand-written model was copied through', mutations[0].models[1].contextWindow, 9)
 check('the key traveled only as a bearer header', calls[0].authorization, 'Bearer test-key')
+check('the request uses the configured proxy', calls[0].proxy, 'http://proxy.test:9')
 check('the key is not an anthropic header on this route', calls[0].apiKey, undefined)
 check('google was not listed', calls.some((call) => String(call.url).includes('google')), false)
 

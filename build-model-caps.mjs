@@ -135,7 +135,7 @@ const manifest = {
     client: {
       platform: 'web',
       immediately: false,
-      inject: ['@deepseek-ai/dsh-client-ui-slots'],
+      inject: [],
       external: ['react'],
     },
   },

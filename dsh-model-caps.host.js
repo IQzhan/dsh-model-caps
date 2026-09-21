@@ -1,11 +1,10 @@
 /**
  * dsh-model-caps.host.js — Cordis adapter.
  *
- * On mount, and whenever `llm-pi-ai` settings change in a way that leaves a
- * custom model without a context window, output cap, or thinking levels,
- * fill those blanks. A settings section talks to this process over
- * `/api/dsh-model-caps`. `mountModelCaps` returns nothing: Cordis treats
- * `apply`'s return as the plugin effect and rejects a plain object.
+ * On mount, and whenever the user saves `llm-pi-ai` settings, fill blank
+ * caps. The plugin's own write is ignored so it does not sync again.
+ * `mountModelCaps` returns nothing: Cordis treats `apply`'s return as the
+ * plugin effect and rejects a plain object.
  *
  * @module dsh-model-caps/host
  */
@@ -23,6 +22,8 @@ function mountModelCaps(ctx) {
   }
   let chain = Promise.resolve()
   let settledGap = null
+  let credentials
+  let ownWrite = 0
 
   const run = async (force) => {
     const settings = typeof ctx.get === 'function' ? ctx.get('settings') : ctx.settings
@@ -33,12 +34,23 @@ function mountModelCaps(ctx) {
     const described = settings.describe().find((entry) => entry.ns === SETTINGS_NS)
     const gap = gapSignature(described?.user)
     if (!force && gap === settledGap) return last
+    const guarded = {
+      describe: () => settings.describe(),
+      mutate: async (ns, ops, revision) => {
+        ownWrite += 1
+        try {
+          return await settings.mutate(ns, ops, revision)
+        } finally {
+          ownWrite -= 1
+        }
+      },
+    }
     last = { ...last, running: true, error: null }
     try {
       const result = await syncCaps({
-        settings,
-        credentials: typeof ctx.get === 'function' ? ctx.get('credentials') : undefined,
-        fetch: globalThis.fetch.bind(globalThis),
+        settings: guarded,
+        credentials,
+        fetch: globalThis.fetch,
       })
       const next = settings.describe().find((entry) => entry.ns === SETTINGS_NS)
       settledGap = gapSignature(next?.user)
@@ -72,7 +84,8 @@ function mountModelCaps(ctx) {
 
   if (typeof ctx.on === 'function') {
     ctx.on('settings/updated', (ns) => {
-      if (ns === SETTINGS_NS) void enqueue(false)
+      if (ns !== SETTINGS_NS || ownWrite > 0) return
+      void enqueue(true)
     })
   }
 
@@ -107,6 +120,12 @@ function mountModelCaps(ctx) {
     }))
   }
   if (typeof ctx.inject === 'function') {
+    ctx.inject(['credentials'], (scope) => {
+      credentials = scope.credentials
+      // The settings hook may have already run a pass before this service
+      // existed. Force one more so that pass is not the one that sticks.
+      void enqueue(true)
+    })
     ctx.inject(['webServer'], registerRoute)
     ctx.inject(['settings'], () => { void enqueue(false) })
   }

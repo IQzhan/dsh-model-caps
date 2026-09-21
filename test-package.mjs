@@ -22,7 +22,7 @@ check('package name matches the patch row', pkg.name, 'dsh-model-caps')
 check('package declares dsh.client for web', pkg.dsh?.client?.platform, 'web')
 check('package declares a bundle patch', pkg.dsh?.bundle?.patch, './cordis.patch.yml')
 check('package exposes ./client', pkg.exports?.['./client']?.default, './lib/client.cjs')
-check('client injects the slots package before itself', pkg.dsh?.client?.inject, ['@deepseek-ai/dsh-client-ui-slots'])
+check('client injects nothing up front', pkg.dsh?.client?.inject, [])
 check('client shares the shell React', pkg.dsh?.client?.external, ['react'])
 check('client waits for the shell', pkg.dsh?.client?.immediately, false)
 

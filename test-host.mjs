@@ -38,10 +38,15 @@ const settings = {
   mutate: async (_ns, ops) => {
     mutations.push(ops)
     user.providers['b-ai'] = { ...user.providers['b-ai'], models: ops[0].value }
+    for (const listener of listeners) {
+      if (listener.event === 'settings/updated') listener.fn('llm-pi-ai')
+    }
   },
 }
 const previousFetch = globalThis.fetch
+let fetches = 0
 globalThis.fetch = async (url, init) => {
+  fetches += 1
   const href = String(url)
   if (href.includes('models.dev')) {
     return {
@@ -58,6 +63,7 @@ globalThis.fetch = async (url, init) => {
 
 const routes = []
 const injected = []
+const listeners = []
 const ctx = {
   inject: (deps, callback) => {
     injected.push(deps.join(','))
@@ -66,11 +72,16 @@ const ctx = {
         webServer: { register: (route) => { routes.push(route); return () => {} } },
         effect: (fn) => fn(),
       })
+    } else if (deps[0] === 'credentials') {
+      callback({ credentials: { resolve: async () => ({ value: 'test-key' }) } })
     } else {
       callback()
     }
   },
-  on: () => () => {},
+  on: (event, fn) => {
+    listeners.push({ event, fn })
+    return () => {}
+  },
   get: (name) => {
     if (name === 'settings') return settings
     if (name === 'credentials') return { resolve: async () => ({ value: 'test-key' }) }
@@ -80,7 +91,7 @@ const ctx = {
 
 const returned = plugin.apply(ctx)
 check('apply returns undefined', returned, undefined)
-check('host waits for webServer and settings', injected, ['webServer', 'settings'])
+check('host waits for credentials, webServer, and settings', injected, ['credentials', 'webServer', 'settings'])
 check('a prefix route is registered', routes[0]?.kind, 'prefix')
 check('the route is under /api/dsh-model-caps', routes[0]?.path, '/api/dsh-model-caps')
 
@@ -98,6 +109,20 @@ check('the blank model was filled once', mutations.length >= 1, true)
 check('listing context wins over the catalog', mutations[0][0].value[0].contextWindow, 8192)
 check('catalog output fills the blank maxTokens', mutations[0][0].value[0].maxTokens, 1024)
 check('sync result is an object', typeof json.providers, 'object')
+
+const beforeSave = fetches
+const save = listeners.find((listener) => listener.event === 'settings/updated')
+check('host listens for settings saves', save !== undefined, true)
+save.fn('llm-pi-ai')
+const deadline = Date.now() + 2000
+while (fetches === beforeSave && Date.now() < deadline) {
+  await new Promise((resolve) => setTimeout(resolve, 10))
+}
+check('saving the provider syncs again', fetches > beforeSave, true)
+await new Promise((resolve) => setTimeout(resolve, 80))
+const afterSave = fetches
+await new Promise((resolve) => setTimeout(resolve, 80))
+check('the plugin write does not sync again', fetches, afterSave)
 
 globalThis.fetch = previousFetch
 

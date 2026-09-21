@@ -2,8 +2,11 @@
  * dsh-model-caps-core — policy with no Cordis and no IO.
  *
  * Decides which routes are custom providers, reads a model listing or a
- * public catalog into context / output / thinking-level caps, and plans the
- * settings edits that fill only the fields a model does not already have.
+ * public catalog into context / output / thinking caps, and plans the
+ * settings edits. A blank field is filled from the provider listing, then
+ * from the model's maker on models.dev. A trailing calendar date falls
+ * back to that undated id only when the snapshot itself has no row.
+ * Reseller copies of the same id are not intersected.
  *
  * @module dsh-model-caps-core
  */
@@ -31,6 +34,39 @@ const THINKING_LEVELS = Object.freeze([
  * the chat menu shows; the original token stays the wire spelling unless it
  * is an off-synonym, which sends nothing except the explicit `none`.
  */
+/**
+ * models.dev repeats every popular id under resellers, and those copies
+ * publish different effort subsets. The trainer's own provider is the
+ * record that names the levels. Anyone else is a fallback.
+ */
+const MAKER_PROVIDERS = new Set([
+  'openai',
+  'anthropic',
+  'google',
+  'google-vertex',
+  'deepseek',
+  'alibaba',
+  'alibaba-cn',
+  'zai',
+  'zhipuai',
+  'moonshotai',
+  'minimax',
+  'xiaomi',
+  'tencent-tokenhub',
+  'mistral',
+  'xai',
+  'cohere',
+])
+
+/**
+ * Makers whose hybrid thinking is `enable_thinking` on Chat Completions.
+ * pi-ai's `qwen` format sends that boolean from whether a level is selected,
+ * and sends `reasoning_effort` only when `supportsReasoningEffort` is set.
+ */
+const QWEN_THINKING = new Set(['alibaba', 'alibaba-cn'])
+
+const INPUT_MODALITIES = new Set(['text', 'image'])
+
 const LEVEL_ALIASES = Object.freeze({
   off: 'off',
   none: 'off',
@@ -231,10 +267,14 @@ function capsFromListingEntry(entry) {
     maxTokens = undefined
   }
   const reasoningEfforts = effortsFromEntry(entry)
+  const name = label(entry.name)
+  const input = catalogInput(entry.input ?? entry.modalities?.input)
   return {
     ...contextWindow === undefined ? {} : { contextWindow },
     ...maxTokens === undefined ? {} : { maxTokens },
     ...reasoningEfforts === undefined ? {} : { reasoningEfforts },
+    ...name === undefined ? {} : { name },
+    ...input === undefined ? {} : { input },
   }
 }
 
@@ -261,109 +301,296 @@ function readListing(body) {
   return models
 }
 
-function bareId(id) {
-  const slash = id.lastIndexOf('/')
-  return slash >= 0 ? id.slice(slash + 1) : id
+function optionShape(options) {
+  const list = Array.isArray(options) ? options : []
+  const effort = list.find((item) => item !== null && typeof item === 'object' && item.type === 'effort' && Array.isArray(item.values))
+  return {
+    effort,
+    toggle: list.some((item) => item !== null && typeof item === 'object' && item.type === 'toggle'),
+    budget: list.some((item) => item !== null && typeof item === 'object' && item.type === 'budget_tokens'),
+  }
 }
 
-function capsFromCatalogModel(model) {
+/**
+ * Published effort names, plus `off` in the same map when the record can
+ * disable thinking. A toggle with no effort list becomes off + one on-level
+ * only for a dialect that can send the switch; otherwise the map stays unset.
+ */
+function effortsFromCatalogOptions(options, dialect) {
+  const shape = optionShape(options)
+  let draft
+  if (shape.effort !== undefined) {
+    draft = effortsFromNames(shape.effort.values, false)
+    if (draft !== undefined && shape.toggle && !Object.prototype.hasOwnProperty.call(draft, 'off')) {
+      draft = finishEfforts({ ...draft, off: null })
+    }
+  }
+  if (draft === undefined && shape.toggle && dialect) {
+    draft = { off: null, high: 'high' }
+  }
+  return { efforts: draft, shape, publishedEffort: shape.effort !== undefined && draft !== undefined && Object.keys(draft).some((level) => level !== 'off' && shape.effort.values.some((value) => levelOf(value)?.level === level)) }
+}
+
+function qwenCompat(provider, parsed) {
+  if (!QWEN_THINKING.has(provider) || !parsed.shape.toggle || parsed.efforts === undefined) return undefined
+  const compat = {
+    thinkingFormat: 'qwen',
+    supportsReasoningEffort: parsed.publishedEffort,
+  }
+  if (parsed.shape.budget) compat.thinkingTokenBudgetField = 'thinking_budget'
+  return compat
+}
+
+function catalogInput(modalities) {
+  if (!Array.isArray(modalities)) return undefined
+  const input = []
+  for (const modality of ['text', 'image']) {
+    if (modalities.includes(modality) && INPUT_MODALITIES.has(modality)) input.push(modality)
+  }
+  return input.length > 0 ? input : undefined
+}
+
+function capsFromCatalogModel(model, provider) {
   const contextWindow = positiveInt(model?.limit?.context)
   const maxTokens = positiveInt(model?.limit?.output)
-  const reasoningEfforts = effortsFromOptions(model?.reasoning_options)
-  if (contextWindow === undefined && maxTokens === undefined && reasoningEfforts === undefined) return undefined
+  const parsed = effortsFromCatalogOptions(model?.reasoning_options, QWEN_THINKING.has(provider))
+  let reasoningEfforts = parsed.efforts
+  const thinkingKnown = reasoningEfforts !== undefined || parsed.shape.toggle || model?.reasoning === false
+  if (reasoningEfforts === undefined && model?.reasoning === false) reasoningEfforts = false
+  const name = label(model?.name)
+  const input = catalogInput(model?.modalities?.input)
+  const compat = qwenCompat(provider, parsed)
+  if (contextWindow === undefined && maxTokens === undefined && reasoningEfforts === undefined && !thinkingKnown && name === undefined && input === undefined) {
+    return undefined
+  }
   return {
     ...contextWindow === undefined ? {} : { contextWindow },
     ...maxTokens === undefined ? {} : { maxTokens },
     ...reasoningEfforts === undefined ? {} : { reasoningEfforts },
+    ...name === undefined ? {} : { name },
+    ...input === undefined ? {} : { input },
+    ...compat === undefined ? {} : { compat },
+    thinkingKnown,
   }
 }
 
-function pushCap(index, bucket, caps) {
+function pushRecord(index, bucket, record) {
   if (bucket.length === 0) return
   const list = index[bucket] ?? []
-  if (list.includes(caps)) return
-  list.push(caps)
+  if (list.some((item) => item.provider === record.provider)) return
+  list.push(record)
   index[bucket] = list
 }
 
 /**
- * Index a models.dev document by exact id and by its lower-case form.
- * One model is stored once per bucket. Callers intersect the bucket, so a
- * level is kept only when every record that publishes efforts agrees.
+ * Index a models.dev document by exact id, not by the last path segment.
+ * `vendor/glm-5.1` is that vendor's alias; folding it into `glm-5.1` is
+ * what let fifty reseller subsets vote the menu down to one shared level.
  */
 function indexCatalog(body) {
   const index = {}
   if (body === null || typeof body !== 'object' || Array.isArray(body)) return index
-  for (const provider of Object.values(body)) {
+  for (const [providerId, provider] of Object.entries(body)) {
     const models = provider?.models
     if (models === null || typeof models !== 'object') continue
     const entries = Array.isArray(models)
       ? models.map((model) => [typeof model?.id === 'string' ? model.id : '', model])
       : Object.entries(models)
+    const familySize = {}
+    let providerSize = 0
+    for (const [, model] of entries) {
+      providerSize += 1
+      const family = typeof model?.family === 'string' ? model.family : ''
+      if (family.length === 0) continue
+      familySize[family] = (familySize[family] ?? 0) + 1
+    }
     for (const [key, model] of entries) {
-      const caps = capsFromCatalogModel(model)
+      const caps = capsFromCatalogModel(model, providerId)
       if (caps === undefined) continue
+      const family = typeof model?.family === 'string' ? model.family : ''
+      const record = {
+        provider: providerId,
+        providerSize,
+        familySize: family.length > 0 ? familySize[family] ?? 0 : 1,
+        thinkingKnown: caps.thinkingKnown === true,
+        ...caps,
+      }
       const buckets = new Set()
-      if (typeof key === 'string' && key.length > 0) buckets.add(key)
-      if (typeof model?.id === 'string' && model.id.length > 0) buckets.add(model.id)
-      for (const id of [...buckets]) buckets.add(bareId(id))
+      if (typeof key === 'string' && key.length > 0 && !key.includes('/')) buckets.add(key)
+      if (typeof model?.id === 'string' && model.id.length > 0 && !model.id.includes('/')) buckets.add(model.id)
       for (const id of buckets) {
-        pushCap(index, id, caps)
-        pushCap(index, id.toLowerCase(), caps)
+        pushRecord(index, id, record)
+        pushRecord(index, id.toLowerCase(), record)
       }
     }
   }
   return index
 }
 
-function agreeNumber(records, field) {
-  const values = []
+function concentration(record) {
+  if (record.providerSize <= 0) return 0
+  return record.familySize / record.providerSize
+}
+
+function effortKey(efforts) {
+  if (efforts === undefined || efforts === false || efforts === null) return ''
+  return THINKING_LEVELS
+    .filter((level) => Object.prototype.hasOwnProperty.call(efforts, level))
+    .map((level) => `${level}=${String(efforts[level])}`)
+    .join(',')
+}
+
+/** The effort list published by the most records. One reseller's full enum must not beat it. */
+function modeEfforts(records) {
+  const counts = new Map()
   for (const record of records) {
-    if (record[field] !== undefined) values.push(record[field])
+    const key = effortKey(record.reasoningEfforts)
+    if (key.length === 0) continue
+    const hit = counts.get(key) ?? { count: 0, efforts: record.reasoningEfforts }
+    hit.count += 1
+    counts.set(key, hit)
   }
-  if (values.length === 0) return undefined
-  return values.every((value) => value === values[0]) ? values[0] : undefined
-}
-
-function pickWire(level, wires) {
-  if (wires.every((wire) => wire === wires[0])) return wires[0]
-  if (level === 'off') {
-    if (wires.includes('none')) return 'none'
-    if (wires.includes(null)) return null
-    return wires.find((wire) => typeof wire === 'string') ?? null
+  let best
+  for (const hit of counts.values()) {
+    if (best === undefined || hit.count > best.count) best = hit
   }
-  return level
+  return best?.efforts
 }
 
-function intersectEfforts(lists) {
-  const draft = {}
-  for (const level of THINKING_LEVELS) {
-    if (!lists.every((efforts) => Object.prototype.hasOwnProperty.call(efforts, level))) continue
-    draft[level] = pickWire(level, lists.map((efforts) => efforts[level]))
-  }
-  return finishEfforts(draft)
+function byConcentration(records) {
+  return [...records].sort((left, right) => {
+    const share = concentration(right) - concentration(left)
+    if (share !== 0) return share
+    if (right.familySize !== left.familySize) return right.familySize - left.familySize
+    if (left.provider.length !== right.provider.length) return left.provider.length - right.provider.length
+    return left.provider < right.provider ? -1 : 1
+  })[0]
 }
 
-function agreeEfforts(records) {
-  const lists = records.map((record) => record.reasoningEfforts).filter((efforts) => efforts !== undefined)
-  if (lists.length === 0) return undefined
-  return intersectEfforts(lists)
+/** The trainer when one is present, otherwise the catalog that is mostly this family. */
+function selectMaker(records) {
+  if (records.length === 0) return undefined
+  const makers = records.filter((record) => MAKER_PROVIDERS.has(record.provider))
+  if (makers.length > 0) return byConcentration(makers)
+  const host = byConcentration(records)
+  const efforts = modeEfforts(records)
+  if (host === undefined) return undefined
+  if (efforts === undefined) return host
+  return { ...host, reasoningEfforts: efforts, thinkingKnown: true }
 }
 
-function catalogRecords(catalog, modelId) {
+function calendarDate(year, month, day) {
+  const y = Number(year)
+  const m = Number(month)
+  const d = Number(day)
+  if (y < 2000 || y > 2100 || m < 1 || m > 12 || d < 1 || d > 31) return false
+  const date = new Date(Date.UTC(y, m - 1, d))
+  return date.getUTCFullYear() === y && date.getUTCMonth() === m - 1 && date.getUTCDate() === d
+}
+
+/**
+ * A trailing calendar date is a snapshot of the same model.
+ * Separators are `-`, `_`, `:`, and `@`. `preview` and `-v2` are not versions.
+ * `qwen3.7-flash-2026-07-15` and `claude-sonnet-4@20250514` both peel.
+ */
+function datedVersionBase(modelId) {
+  if (typeof modelId !== 'string' || modelId.length === 0) return undefined
+  const iso = /^(.*)[-_:@](\d{4})-(\d{2})-(\d{2})$/.exec(modelId)
+  if (iso !== null && iso[1].length > 0 && calendarDate(iso[2], iso[3], iso[4])) return iso[1]
+  const compact = /^(.*)[-_:@](\d{4})(\d{2})(\d{2})$/.exec(modelId)
+  if (compact !== null && compact[1].length > 0 && calendarDate(compact[2], compact[3], compact[4])) return compact[1]
+  return undefined
+}
+
+function recordsAt(catalog, modelId) {
+  if (typeof modelId !== 'string' || modelId.length === 0) return []
   const exact = catalog[modelId]
   if (exact !== undefined && exact.length > 0) return exact
   const lower = catalog[modelId.toLowerCase()]
   return lower ?? []
 }
 
-function resolveCaps(modelId, listed, catalog) {
-  const fromList = listed.find((item) => item.id === modelId) ?? {}
-  const agreed = catalogRecords(catalog, modelId)
+function catalogRecords(catalog, modelId) {
+  const seen = new Set()
+  let id = modelId
+  while (typeof id === 'string' && id.length > 0 && !seen.has(id)) {
+    seen.add(id)
+    const found = recordsAt(catalog, id)
+    if (found.length > 0) return found
+    const base = datedVersionBase(id)
+    if (base === undefined) return []
+    id = base
+  }
+  return []
+}
+
+function sameModelId(left, right) {
+  return typeof left === 'string' && typeof right === 'string' && left.toLowerCase() === right.toLowerCase()
+}
+
+/** Exact listing row wins each field. A dated id with a blank field borrows that field from the undated row. */
+function listingFor(listed, modelId) {
+  const exact = listed.find((item) => item.id === modelId)
+  let donor
+  const seen = new Set()
+  let id = modelId
+  while (donor === undefined && typeof id === 'string' && !seen.has(id)) {
+    seen.add(id)
+    const base = datedVersionBase(id)
+    if (base === undefined) break
+    donor = listed.find((item) => sameModelId(item.id, base))
+    id = base
+  }
+  if (donor === undefined) return exact ?? {}
   return {
-    contextWindow: fromList.contextWindow ?? agreeNumber(agreed, 'contextWindow'),
-    maxTokens: fromList.maxTokens ?? agreeNumber(agreed, 'maxTokens'),
-    reasoningEfforts: fromList.reasoningEfforts ?? agreeEfforts(agreed),
+    contextWindow: exact?.contextWindow ?? donor.contextWindow,
+    maxTokens: exact?.maxTokens ?? donor.maxTokens,
+    reasoningEfforts: exact?.reasoningEfforts ?? donor.reasoningEfforts,
+    name: exact?.name ?? donor.name,
+    input: exact?.input ?? donor.input,
+  }
+}
+
+function standardWire(level, wire) {
+  if (wire === null) return level === 'off'
+  if (typeof wire !== 'string') return false
+  const token = wire.trim().toLowerCase()
+  if (token === 'none') return level === 'off'
+  return token === level
+}
+
+/** A map whose wires are only the level names (or `none` for off) is a catalog fill, not a hand-written dialect. */
+function catalogShaped(efforts) {
+  if (efforts === null || typeof efforts !== 'object' || Array.isArray(efforts)) return false
+  const keys = Object.keys(efforts)
+  if (keys.length === 0) return false
+  return keys.every((key) => THINKING_LEVELS.includes(key) && standardWire(key, efforts[key]))
+}
+
+function effortsEqual(left, right) {
+  if (left === right) return true
+  if (left === false || right === false || left == null || right == null) return false
+  if (typeof left !== 'object' || typeof right !== 'object') return false
+  for (const level of THINKING_LEVELS) {
+    if (left[level] !== right[level]) return false
+  }
+  return true
+}
+
+function resolveCaps(modelId, listed, catalog) {
+  const fromList = listingFor(listed, modelId)
+  const records = catalogRecords(catalog, modelId)
+  const maker = selectMaker(records)
+  const reasoningEfforts = fromList.reasoningEfforts ?? maker?.reasoningEfforts
+  const compat = fromList.reasoningEfforts !== undefined ? undefined : maker?.compat
+  return {
+    contextWindow: fromList.contextWindow ?? maker?.contextWindow,
+    maxTokens: fromList.maxTokens ?? maker?.maxTokens,
+    reasoningEfforts,
+    effortsKnown: fromList.reasoningEfforts !== undefined || maker?.thinkingKnown === true,
+    ...fromList.name !== undefined || maker?.name !== undefined ? { name: fromList.name ?? maker?.name } : {},
+    ...fromList.input !== undefined || maker?.input !== undefined ? { input: fromList.input ?? maker?.input } : {},
+    ...compat === undefined ? {} : { compat },
   }
 }
 
@@ -371,6 +598,10 @@ function applyCaps(model, caps) {
   if (model === null || typeof model !== 'object' || Array.isArray(model)) return model
   const next = { ...model }
   let changed = false
+  if ((model.name === undefined || model.name === '') && typeof caps.name === 'string' && caps.name.length > 0) {
+    next.name = caps.name
+    changed = true
+  }
   if (model.contextWindow === undefined && caps.contextWindow !== undefined) {
     next.contextWindow = caps.contextWindow
     changed = true
@@ -379,8 +610,23 @@ function applyCaps(model, caps) {
     next.maxTokens = caps.maxTokens
     changed = true
   }
+  const blankInput = !Array.isArray(model.input) || model.input.length === 0
+  if (blankInput && Array.isArray(caps.input) && caps.input.length > 0) {
+    next.input = caps.input
+    changed = true
+  }
+  const refresh = model.compat === undefined && catalogShaped(model.reasoningEfforts)
   if (model.reasoningEfforts === undefined && caps.reasoningEfforts !== undefined) {
     next.reasoningEfforts = caps.reasoningEfforts
+    changed = true
+  } else if (refresh && caps.effortsKnown && !effortsEqual(model.reasoningEfforts, caps.reasoningEfforts)) {
+    if (caps.reasoningEfforts === undefined) delete next.reasoningEfforts
+    else next.reasoningEfforts = caps.reasoningEfforts
+    changed = true
+  }
+  const wroteEfforts = model.reasoningEfforts === undefined && next.reasoningEfforts !== undefined
+  if (model.compat === undefined && caps.compat !== undefined && (wroteEfforts || refresh)) {
+    next.compat = caps.compat
     changed = true
   }
   return changed ? next : model

@@ -13,9 +13,11 @@ A custom provider is a `llm-pi-ai` route that has `api`, `baseURL`, and at least
 For each model on that route, a blank field is filled from:
 
 1. The provider's own `GET {baseURL}/models` listing, when it actually publishes the number or the thinking levels.
-2. Otherwise [models.dev](https://models.dev/api.json), and only when every record for that model id agrees. Thinking levels are the intersection, not a vote.
+2. Otherwise [models.dev](https://models.dev/api.json), using the **maker's** record (OpenAI, Z.AI, Alibaba, DeepSeek, and the other trainers). An id with no row of its own falls back through a trailing calendar date (`-`, `_`, `:`, or `@`, as `YYYY-MM-DD` or `YYYYMMDD`) to that undated id. An exact catalog id still wins, including its own context and output. `preview`, `exp`, and `-v2` are not versions. Reseller copies of one id disagree, and intersecting them collapses the menu to the one level every copy repeated.
 
-`contextWindow`, `maxTokens`, and `reasoningEfforts` are the only fields written. `compat`, `input`, names, and a `reasoningEfforts: false` you set yourself are not touched. A gateway that needs `compat.thinkingFormat` still needs that one line: no listing publishes it.
+`off` is written into the same `reasoningEfforts` map as the other levels when the maker publishes a toggle or an `none` value. A toggle with no effort list is `off` plus one on-level, and only for the Alibaba Chat Completions dialect (`thinkingFormat: qwen`, `enable_thinking`). Any other toggle is left unset rather than given invented levels. A maker that publishes neither a toggle nor an effort list does not get a thinking map.
+
+`contextWindow`, `maxTokens`, blank `name`, blank `input` (`text` / `image` only), `reasoningEfforts`, and that dialect's `compat` are the fields written. A model with `compat`, a `reasoningEfforts: false` you set yourself, and any effort wire that is not a standard level name (for example `no_think`) stay. A map that only repeats catalog level names and has no `compat` block is refreshed from the maker, because that shape is what an earlier fill wrote. Route-level thinking budgets are not written. Requests use `HTTPS_PROXY` when it is set, and otherwise the operating-system proxy.
 
 ## Install
 
@@ -24,8 +26,8 @@ node build-model-caps.mjs
 dsh plugin --profile web add ./package
 ```
 
-Requires Node 24 or newer. Restart `dsh web`. Settings → **Model caps** shows the last sync and a **Sync now** button. Mount, and any later change that leaves a custom model blank, syncs on its own.
+Requires Node 24 or newer. Restart `dsh web`. Caps fill on mount, and again when you save the provider in Settings. There is no separate settings page.
 
 ## Uninstall
 
-`dsh plugin --profile web remove dsh-model-caps`. Nothing of yours is restored, because nothing of yours was overwritten.
+`dsh plugin --profile web remove dsh-model-caps`. A custom wire or a `compat` block is not overwritten. A catalog-shaped effort map can be refreshed; removing the plugin does not roll that back.

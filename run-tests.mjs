@@ -6,7 +6,7 @@ const SUITES = [
   ['test-sync.mjs', 'sync: credentials, listing failure, no second write'],
   ['test-host.mjs', 'adapter: apply return, route, one fill'],
   ['test-package.mjs', 'package: both loaders'],
-  ['test-client.mjs', 'settings section: locale keys, no top-level React'],
+  ['test-client.mjs', 'client: no settings page'],
   ['test-docs.mjs', 'docs: both readmes name the install'],
   ['test-portability.mjs', 'portability: no absolute path, no Windows-only path'],
 ]
