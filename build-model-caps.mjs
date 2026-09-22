@@ -18,7 +18,7 @@ import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const PLUGIN_NAME = 'dsh-model-caps'
-const VERSION = '1.0.0'
+const VERSION = process.env.DSH_MODEL_CAPS_VERSION || '1.0.0'
 const LINK_TYPE = process.platform === 'win32' ? 'junction' : 'dir'
 const OUT_PACKAGE = join(here, 'package')
 
@@ -121,14 +121,22 @@ const clientModule = [banner, wrapClient(clientSource)].join('\n')
 const manifest = {
   name: PLUGIN_NAME,
   version: VERSION,
-  private: true,
-  description: 'Fill blank context windows, output caps, and thinking levels for custom DeepSeek Harness providers.',
+  description: 'Fill blank context windows, output caps, thinking levels, and thinking wire compat for custom DeepSeek Harness providers.',
   type: 'commonjs',
   main: './lib/index.cjs',
   exports: {
     '.': { default: './lib/index.cjs' },
     './client': { default: './lib/client.cjs' },
     './package.json': './package.json',
+  },
+  files: [
+    'lib',
+    'cordis.patch.yml',
+    'README.md',
+  ],
+  repository: {
+    type: 'git',
+    url: 'git+https://github.com/IQzhan/dsh-model-caps.git',
   },
   dsh: {
     bundle: { patch: './cordis.patch.yml' },
@@ -140,6 +148,7 @@ const manifest = {
     },
   },
   engines: { node: '>=24' },
+  license: 'MIT',
 }
 
 const bundlePatch = `# ${PLUGIN_NAME} bundle patch.
@@ -156,6 +165,18 @@ await rm(join(OUT_PACKAGE, 'lib'), { recursive: true, force: true })
 await rm(join(OUT_PACKAGE, 'cordis.patch.yml'), { force: true })
 await mkdir(join(OUT_PACKAGE, 'lib'), { recursive: true })
 await writeFile(join(OUT_PACKAGE, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+await writeFile(join(OUT_PACKAGE, 'README.md'), [
+  '# dsh-model-caps',
+  '',
+  'Fill blank context windows, output caps, thinking levels, and thinking wire compat for custom DeepSeek Harness providers.',
+  '',
+  '```bash',
+  'dsh plugin --profile web add dsh-model-caps',
+  '```',
+  '',
+  'Then restart `dsh web`. Requires Node 24 or newer. See the repository README and DESIGN.md.',
+  '',
+].join('\n'), 'utf8')
 await writeFile(join(OUT_PACKAGE, 'cordis.patch.yml'), bundlePatch, 'utf8')
 await writeFile(join(OUT_PACKAGE, 'lib', 'index.cjs'), `${hostModule}\n`, 'utf8')
 await writeFile(join(OUT_PACKAGE, 'lib', 'client.cjs'), `${clientModule}\n`, 'utf8')
