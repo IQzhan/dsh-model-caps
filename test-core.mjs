@@ -1,13 +1,16 @@
 import {
   CATALOG_URL,
   gapSignature,
+  indexBuiltins,
   indexCatalog,
   isCustomProvider,
   listingHeaders,
   listingUrl,
   planMutations,
+  projectBuiltin,
   readListing,
   resolveCaps,
+  selectBuiltin,
 } from './dsh-model-caps-core.js'
 
 const results = []
@@ -107,8 +110,54 @@ check('the maker record wins over a reseller that only repeats high', resolveCap
   maxTokens: 200,
   reasoningEfforts: { low: 'low', high: 'high', max: 'max' },
   effortsKnown: true,
+  compat: { thinkingFormat: 'zai', supportsReasoningEffort: true, supportsDeveloperRole: false },
 })
 check('a slashed reseller id is not folded onto the bare id', catalog['glm-x'].some((record) => record.provider === 'greenpt'), false)
+
+const crowded = indexCatalog({
+  zai: {
+    models: {
+      'glm-5.3-flash': {
+        id: 'glm-5.3-flash',
+        name: 'GLM-5.3-Flash',
+        family: 'glm',
+        limit: { context: 1000000, output: 131072 },
+        reasoning_options: [{ type: 'effort', values: ['low', 'high', 'max'] }],
+      },
+      'glm-5.3-flashx': {
+        id: 'glm-5.3-flashx',
+        name: 'GLM-5.3-FlashX',
+        family: 'glm',
+        limit: { context: 1000000, output: 131072 },
+        reasoning_options: [{ type: 'effort', values: ['low', 'high', 'max'] }],
+      },
+      other: { id: 'other', family: 'other', limit: { context: 1, output: 1 } },
+    },
+  },
+  privatemode: {
+    models: {
+      'glm-5.3-flash': {
+        id: 'glm-5.3-flash',
+        family: 'glm',
+        limit: { context: 256000, output: 131072 },
+        reasoning_options: [{ type: 'effort', values: ['low', 'high', 'max'] }],
+      },
+      twin: { id: 'twin', family: 'glm', limit: { context: 1, output: 1 } },
+    },
+  },
+})
+check('a trainer beats a native reseller with a smaller context window', resolveCaps('glm-5.3-flash', [], crowded).contextWindow, 1000000)
+check('a gateway-prefixed id uses the bare trainer row', resolveCaps('ZHIPU/GLM-5.3-Flash', [], crowded), {
+  contextWindow: 1000000,
+  maxTokens: 131072,
+  reasoningEfforts: { low: 'low', high: 'high', max: 'max' },
+  effortsKnown: true,
+  name: 'GLM-5.3-Flash',
+  compat: { thinkingFormat: 'zai', supportsReasoningEffort: true, supportsDeveloperRole: false },
+})
+check('FlashX is its own row, not folded onto Flash', resolveCaps('ZHIPU/GLM-5.3-FlashX', [], crowded).name, 'GLM-5.3-FlashX')
+check('a scheme prefix then a path still reaches the bare id', resolveCaps('hf:zai-org/GLM-5.3-Flash', [], crowded).contextWindow, 1000000)
+check('a channel after a colon is not treated as a scheme', resolveCaps('glm-5.3-flash:fast', [], crowded).effortsKnown, false)
 
 const fallback = indexCatalog({
   tiny: {
@@ -133,7 +182,7 @@ const fallback = indexCatalog({
     },
   },
 })
-check('without a maker, the common effort list beats one host that lists every level', resolveCaps('m', [], fallback).reasoningEfforts, {
+check('without a maker, equal-sized catalogs take the mode of effort lists', resolveCaps('m', [], fallback).reasoningEfforts, {
   low: 'low', high: 'high',
 })
 check('the provider listing wins a field the catalog also has', resolveCaps('glm-x', [{
@@ -143,6 +192,7 @@ check('the provider listing wins a field the catalog also has', resolveCaps('glm
   maxTokens: 200,
   reasoningEfforts: { max: 'max' },
   effortsKnown: true,
+  compat: { thinkingFormat: 'zai', supportsReasoningEffort: true, supportsDeveloperRole: false },
 })
 
 const section = {
@@ -171,6 +221,7 @@ check('a blank model receives the maker caps', next[1], {
   contextWindow: 8000,
   maxTokens: 200,
   reasoningEfforts: { low: 'low', high: 'high', max: 'max' },
+  compat: { thinkingFormat: 'zai', supportsReasoningEffort: true, supportsDeveloperRole: false },
 })
 check('a catalog-shaped high-only map is replaced with the maker levels', next[2], {
   id: 'glm-x',
@@ -178,6 +229,7 @@ check('a catalog-shaped high-only map is replaced with the maker levels', next[2
   reasoningEfforts: { low: 'low', high: 'high', max: 'max' },
   contextWindow: 8000,
   maxTokens: 200,
+  compat: { thinkingFormat: 'zai', supportsReasoningEffort: true, supportsDeveloperRole: false },
 })
 check('reasoningEfforts false is a choice, not a blank', next[3], section.providers['b-ai'].models[3])
 check('the input section is not mutated', section.providers['b-ai'].models[1].contextWindow, undefined)
@@ -197,6 +249,20 @@ const dated = indexCatalog({
         family: 'qwen',
         reasoning: true,
         limit: { context: 1000000, output: 65536 },
+        reasoning_options: [{ type: 'toggle' }, { type: 'budget_tokens' }],
+      },
+      'qwen3.8-flash': {
+        id: 'qwen3.8-flash',
+        family: 'qwen',
+        reasoning: true,
+        limit: { context: 1000000, output: 65536 },
+        reasoning_options: [{ type: 'toggle' }, { type: 'budget_tokens' }],
+      },
+      'qwen-plus': {
+        id: 'qwen-plus',
+        family: 'qwen',
+        reasoning: true,
+        limit: { context: 1000000, output: 32768 },
         reasoning_options: [{ type: 'toggle' }, { type: 'budget_tokens' }],
       },
     },
@@ -237,6 +303,7 @@ check('a dated snapshot inherits the undated maker, and a toggle is not turned i
     thinkingFormat: 'qwen',
     supportsReasoningEffort: false,
     thinkingTokenBudgetField: 'thinking_budget',
+    supportsDeveloperRole: false,
   },
 })
 check('a compact date suffix is the same snapshot', resolveCaps('qwen3.7-flash-20260715', [], dated).contextWindow, 1000000)
@@ -251,6 +318,7 @@ check('a dated listing row borrows a blank field from the undated row', resolveC
   maxTokens: 8,
   reasoningEfforts: { low: 'low' },
   effortsKnown: true,
+  compat: { supportsDeveloperRole: false },
 })
 
 const datedSection = {
@@ -277,6 +345,7 @@ check('a blank dated model receives the undated context, output, and an off swit
     thinkingFormat: 'qwen',
     supportsReasoningEffort: false,
     thinkingTokenBudgetField: 'thinking_budget',
+    supportsDeveloperRole: false,
   },
 })
 check('a hand-written dated model keeps its efforts and compat', datedNext[1], {
@@ -347,6 +416,7 @@ check('a toggle and an effort list share one map that can turn thinking off', re
     thinkingFormat: 'qwen',
     supportsReasoningEffort: true,
     thinkingTokenBudgetField: 'thinking_budget',
+    supportsDeveloperRole: false,
   },
 })
 const named = planMutations({
@@ -365,7 +435,350 @@ check('a blank snapshot receives name, modalities, and the undated caps', named.
   maxTokens: 64000,
   input: ['text', 'image'],
   reasoningEfforts: { low: 'low', high: 'high' },
+  compat: { supportsDeveloperRole: false },
 })
+
+const hosted = indexCatalog({
+  'alibaba-cn': {
+    models: {
+      'deepseek-v4.1-flash': {
+        id: 'deepseek-v4.1-flash',
+        family: 'deepseek-flash',
+        reasoning: true,
+        limit: { context: 1000000, output: 384000 },
+        modalities: { input: ['text', 'image'] },
+        reasoning_options: [
+          { type: 'toggle' },
+          { type: 'effort', values: ['low', 'high', 'max'] },
+        ],
+      },
+      'qwen3.7-flash': {
+        id: 'qwen3.7-flash',
+        family: 'qwen',
+        reasoning: true,
+        limit: { context: 1000000, output: 65536 },
+        reasoning_options: [{ type: 'toggle' }, { type: 'budget_tokens' }],
+      },
+      'qwen3.8-flash': {
+        id: 'qwen3.8-flash',
+        family: 'qwen',
+        reasoning: true,
+        limit: { context: 1000000, output: 65536 },
+        reasoning_options: [{ type: 'toggle' }, { type: 'budget_tokens' }],
+      },
+      'qwen-plus': {
+        id: 'qwen-plus',
+        family: 'qwen',
+        reasoning: true,
+        limit: { context: 1000000, output: 65536 },
+        reasoning_options: [{ type: 'toggle' }, { type: 'budget_tokens' }],
+      },
+    },
+  },
+  greenpt: {
+    models: {
+      'deepseek-v4.1-flash': {
+        id: 'deepseek-v4.1-flash',
+        family: 'deepseek-flash',
+        reasoning: true,
+        limit: { context: 1000000, output: 384000 },
+        modalities: { input: ['text', 'image'] },
+        reasoning_options: [{ type: 'effort', values: ['none', 'low', 'high', 'max'] }],
+      },
+    },
+  },
+})
+check('a minority family on a host does not receive that host dialect', resolveCaps('deepseek-v4.1-flash', [], hosted), {
+  contextWindow: 1000000,
+  maxTokens: 384000,
+  reasoningEfforts: { off: null, low: 'low', high: 'high', max: 'max' },
+  effortsKnown: true,
+  input: ['text', 'image'],
+  compat: { supportsDeveloperRole: false },
+})
+check('a modal family on a dialect host still receives the dialect', resolveCaps('qwen3.7-flash', [], hosted).compat, {
+  thinkingFormat: 'qwen',
+  supportsReasoningEffort: false,
+  thinkingTokenBudgetField: 'thinking_budget',
+  supportsDeveloperRole: false,
+})
+
+const makers = indexCatalog({
+  deepseek: {
+    models: {
+      'deepseek-v4-flash': {
+        id: 'deepseek-v4-flash',
+        family: 'deepseek-flash',
+        reasoning: true,
+        limit: { context: 1000000, output: 384000 },
+        reasoning_options: [
+          { type: 'toggle' },
+          { type: 'effort', values: ['low', 'high', 'max'] },
+        ],
+      },
+      'deepseek-v4-pro': {
+        id: 'deepseek-v4-pro',
+        family: 'deepseek-thinking',
+        reasoning: true,
+        limit: { context: 1000000, output: 384000 },
+        reasoning_options: [
+          { type: 'toggle' },
+          { type: 'effort', values: ['low', 'high', 'max'] },
+        ],
+      },
+    },
+  },
+  zhipuai: {
+    models: {
+      'glm-5.2': {
+        id: 'glm-5.2',
+        family: 'glm',
+        reasoning: true,
+        limit: { context: 200000, output: 128000 },
+        reasoning_options: [{ type: 'effort', values: ['high', 'max'] }],
+      },
+      twin: { id: 'twin', family: 'glm', limit: { context: 1, output: 1 } },
+    },
+  },
+  zai: {
+    models: {
+      'glm-toggle': {
+        id: 'glm-toggle',
+        family: 'glm',
+        reasoning: true,
+        limit: { context: 128000, output: 16000 },
+        reasoning_options: [{ type: 'toggle' }],
+      },
+      twin: { id: 'twin', family: 'glm', limit: { context: 1, output: 1 } },
+    },
+  },
+  openai: {
+    models: {
+      'gpt-x': {
+        id: 'gpt-x',
+        family: 'gpt',
+        limit: { context: 4000, output: 100 },
+        reasoning_options: [{ type: 'effort', values: ['low', 'high'] }],
+      },
+    },
+  },
+})
+check('a native DeepSeek row gets the deepseek dialect', resolveCaps('deepseek-v4-flash', [], makers), {
+  contextWindow: 1000000,
+  maxTokens: 384000,
+  reasoningEfforts: { off: null, low: 'low', high: 'high', max: 'max' },
+  effortsKnown: true,
+  compat: {
+    thinkingFormat: 'deepseek',
+    supportsReasoningEffort: true,
+    requiresReasoningContentOnAssistantMessages: true,
+    supportsDeveloperRole: false,
+  },
+})
+check('a minority family on DeepSeek still gets the deepseek dialect', resolveCaps('deepseek-v4-pro', [], makers).compat, {
+  thinkingFormat: 'deepseek',
+  supportsReasoningEffort: true,
+  requiresReasoningContentOnAssistantMessages: true,
+  supportsDeveloperRole: false,
+})
+check('a native Zhipu row uses the zai dialect', resolveCaps('glm-5.2', [], makers).compat, {
+  thinkingFormat: 'zai',
+  supportsReasoningEffort: true,
+  supportsDeveloperRole: false,
+})
+check('a toggle-only Z.AI row invents off plus one on-level with the zai dialect', resolveCaps('glm-toggle', [], makers), {
+  contextWindow: 128000,
+  maxTokens: 16000,
+  reasoningEfforts: { off: null, high: 'high' },
+  effortsKnown: true,
+  compat: { thinkingFormat: 'zai', supportsReasoningEffort: false, supportsDeveloperRole: false },
+})
+check('an OpenAI-shaped maker needs no explicit dialect', resolveCaps('gpt-x', [], makers).compat, { supportsDeveloperRole: false })
+
+const strip = planMutations({
+  providers: {
+    gateway: {
+      api: 'openai-completions',
+      baseURL: 'https://gateway.example/v1',
+      models: [{
+        id: 'deepseek-v4.1-flash',
+        contextWindow: 1000000,
+        maxTokens: 384000,
+        reasoningEfforts: { off: 'none', low: 'low', high: 'high', max: 'max' },
+        compat: {
+          thinkingFormat: 'qwen',
+          supportsReasoningEffort: true,
+        },
+      }],
+    },
+  },
+}, { gateway: [] }, hosted)
+check('a mistaken catalog dialect is cleared on refresh', strip.ops[0].value[0].compat, { supportsDeveloperRole: false })
+check('a maker that marks reasoning false disables thinking', resolveCaps('plain-off', [], indexCatalog({
+  openai: {
+    models: {
+      'plain-off': { id: 'plain-off', reasoning: false, limit: { context: 8, output: 2 } },
+    },
+  },
+})), {
+  contextWindow: 8,
+  maxTokens: 2,
+  reasoningEfforts: false,
+  effortsKnown: true,
+})
+
+const builtins = indexBuiltins([
+  {
+    id: 'MiniMax-M3',
+    provider: 'minimax',
+    api: 'anthropic-messages',
+    reasoning: true,
+    contextWindow: 1048576,
+    maxTokens: 512000,
+    name: 'MiniMax-M3',
+    input: ['text', 'image'],
+  },
+  {
+    id: 'MiniMax-M3',
+    provider: 'opencode',
+    api: 'openai-completions',
+    reasoning: true,
+    contextWindow: 1000,
+    maxTokens: 100,
+  },
+  {
+    id: 'kimi-k2.6',
+    provider: 'moonshotai',
+    api: 'openai-completions',
+    reasoning: true,
+    contextWindow: 262144,
+    maxTokens: 262144,
+    compat: {
+      thinkingFormat: 'deepseek',
+      supportsReasoningEffort: false,
+      maxTokensField: 'max_tokens',
+    },
+  },
+  {
+    id: 'kimi-k2.6',
+    provider: 'qwen-token-plan',
+    api: 'openai-completions',
+    reasoning: true,
+    compat: { thinkingFormat: 'qwen', supportsReasoningEffort: false },
+  },
+  {
+    id: 'deepseek-v4-flash',
+    provider: 'deepseek',
+    api: 'openai-completions',
+    reasoning: true,
+    contextWindow: 1000000,
+    maxTokens: 384000,
+    thinkingLevelMap: { minimal: null, low: 'low', medium: null, high: 'high', max: 'max' },
+    compat: {
+      thinkingFormat: 'deepseek',
+      requiresReasoningContentOnAssistantMessages: true,
+    },
+  },
+])
+check('OpenAI route prefers an OpenAI builtin over an Anthropic maker row', selectBuiltin(
+  builtins['minimax-m3'],
+  'openai-completions',
+)?.provider, 'opencode')
+check('Anthropic route prefers the Anthropic minimax builtin', selectBuiltin(
+  builtins['minimax-m3'],
+  'anthropic-messages',
+)?.provider, 'minimax')
+check('maker beats reseller when both share the route api', selectBuiltin(
+  builtins['kimi-k2.6'],
+  'openai-completions',
+)?.provider, 'moonshotai')
+check('Anthropic MiniMax overlays menu onto OpenAI without inventing deepseek wire', resolveCaps(
+  'MiniMax-M3',
+  [],
+  {},
+  builtins,
+  'openai-completions',
+), {
+  contextWindow: 1000,
+  maxTokens: 100,
+  reasoningEfforts: { off: null, high: 'high' },
+  effortsKnown: true,
+  compat: { supportsDeveloperRole: false },
+})
+check('same id on Anthropic route keeps Anthropic menu without Completions dialect', (() => {
+  const caps = resolveCaps('MiniMax-M3', [], {}, builtins, 'anthropic-messages')
+  return caps.contextWindow === 1048576
+    && caps.maxTokens === 512000
+    && caps.name === 'MiniMax-M3'
+    && JSON.stringify(caps.input) === JSON.stringify(['text', 'image'])
+    && JSON.stringify(caps.reasoningEfforts) === JSON.stringify({
+      off: null, minimal: 'minimal', low: 'low', medium: 'medium', high: 'high',
+    })
+    && caps.effortsKnown === true
+    && caps.compat === undefined
+})(), true)
+check('Kimi K2 builtin compat wins over reseller qwen', resolveCaps(
+  'kimi-k2.6',
+  [],
+  {},
+  builtins,
+  'openai-completions',
+).compat, {
+  thinkingFormat: 'deepseek',
+  supportsReasoningEffort: false,
+  supportsDeveloperRole: false,
+})
+check('DeepSeek builtin map becomes reasoningEfforts', resolveCaps(
+  'deepseek-v4-flash',
+  [],
+  {},
+  builtins,
+  'openai-completions',
+), {
+  contextWindow: 1000000,
+  maxTokens: 384000,
+  reasoningEfforts: { low: 'low', high: 'high', max: 'max' },
+  effortsKnown: true,
+  compat: {
+    thinkingFormat: 'deepseek',
+    requiresReasoningContentOnAssistantMessages: true,
+    supportsDeveloperRole: false,
+  },
+})
+check('builtin OpenAI projection of Anthropic M3 when no OpenAI builtin exists', resolveCaps(
+  'MiniMax-M3',
+  [],
+  {},
+  indexBuiltins([{
+    id: 'MiniMax-M3',
+    provider: 'minimax',
+    api: 'anthropic-messages',
+    reasoning: true,
+    contextWindow: 9,
+    maxTokens: 8,
+  }]),
+  'openai-completions',
+), {
+  contextWindow: 9,
+  maxTokens: 8,
+  reasoningEfforts: { off: null, high: 'high' },
+  effortsKnown: true,
+  compat: { supportsDeveloperRole: false },
+})
+check('projectBuiltin anthropic→openai is menu-only (no fabricated deepseek)', (() => {
+  const caps = projectBuiltin({
+    provider: 'minimax',
+    api: 'anthropic-messages',
+    reasoning: true,
+    contextWindow: 9,
+    maxTokens: 8,
+  }, 'openai-completions')
+  return caps.contextWindow === 9
+    && caps.maxTokens === 8
+    && JSON.stringify(caps.reasoningEfforts) === JSON.stringify({ off: null, high: 'high' })
+    && caps.thinkingKnown === true
+    && caps.compat === undefined
+})(), true)
 
 const failed = results.filter((result) => !result.ok)
 for (const result of results) {

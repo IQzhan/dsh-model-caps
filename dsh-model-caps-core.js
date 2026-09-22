@@ -1,12 +1,10 @@
 /**
  * dsh-model-caps-core — policy with no Cordis and no IO.
  *
- * Decides which routes are custom providers, reads a model listing or a
- * public catalog into context / output / thinking caps, and plans the
- * settings edits. A blank field is filled from the provider listing, then
- * from the model's maker on models.dev. A trailing calendar date falls
- * back to that undated id only when the snapshot itself has no row.
- * Reseller copies of the same id are not intersected.
+ * Lookup: normalize id → collect builtin hits → select → project onto the
+ * route api. Per-field merge (DESIGN.md §5): hand-written → listing →
+ * builtin projection → models.dev. OpenAI-compatible is the default track;
+ * Anthropic is optional. Hand-written fields stay.
  *
  * @module dsh-model-caps-core
  */
@@ -30,14 +28,57 @@ const THINKING_LEVELS = Object.freeze([
 ])
 
 /**
- * Spellings a listing may use for a thinking level. The value is the level
- * the chat menu shows; the original token stays the wire spelling unless it
- * is an off-synonym, which sends nothing except the explicit `none`.
+ * models.dev fallback dialects when no pi-ai builtin hit projects thinking.
+ * Alibaba may host foreign families, so only a modal (native) row may attach
+ * `qwen`. DeepSeek / Z.AI / Zhipu rows on their own catalogs are official.
  */
+const MAKER_DIALECT = Object.freeze({
+  alibaba: { thinkingFormat: 'qwen', budgetField: 'thinking_budget', nativeOnly: true },
+  'alibaba-cn': { thinkingFormat: 'qwen', budgetField: 'thinking_budget', nativeOnly: true },
+  deepseek: {
+    thinkingFormat: 'deepseek',
+    requiresReasoningContentOnAssistantMessages: true,
+  },
+  zai: { thinkingFormat: 'zai' },
+  zhipuai: { thinkingFormat: 'zai' },
+})
+
+/** Auto-filled thinking formats (builtin projection + models.dev fallback). */
+const AUTO_THINKING_FORMATS = new Set(['qwen', 'deepseek', 'zai', 'openai'])
+
+const AUTO_COMPAT_KEYS = new Set([
+  'thinkingFormat',
+  'supportsReasoningEffort',
+  'supportsDeveloperRole',
+  'thinkingTokenBudgetField',
+  'requiresReasoningContentOnAssistantMessages',
+  'forceAdaptiveThinking',
+])
+
+const OPENAI_APIS = new Set(['openai-completions', 'openai-responses'])
+
+const ANTHROPIC_DEFAULT_EFFORTS = Object.freeze({
+  off: null,
+  minimal: 'minimal',
+  low: 'low',
+  medium: 'medium',
+  high: 'high',
+})
+
+const TOGGLE_EFFORTS = Object.freeze({ off: null, high: 'high' })
+
+function dialectEligible(provider, native) {
+  const rule = MAKER_DIALECT[provider]
+  if (rule === undefined) return false
+  if (rule.nativeOnly === true) return native === true
+  return true
+}
+
+const INPUT_MODALITIES = new Set(['text', 'image'])
+
 /**
- * models.dev repeats every popular id under resellers, and those copies
- * publish different effort subsets. The trainer's own provider is the
- * record that names the levels. Anyone else is a fallback.
+ * Trainers / first-party catalog routes. Used for models.dev maker pick and
+ * for preferring a builtin hit over reseller builtins (opencode, token-plan).
  */
 const MAKER_PROVIDERS = new Set([
   'openai',
@@ -49,23 +90,17 @@ const MAKER_PROVIDERS = new Set([
   'alibaba-cn',
   'zai',
   'zhipuai',
+  'zai-coding-cn',
   'moonshotai',
+  'moonshotai-cn',
   'minimax',
+  'minimax-cn',
   'xiaomi',
   'tencent-tokenhub',
   'mistral',
   'xai',
   'cohere',
 ])
-
-/**
- * Makers whose hybrid thinking is `enable_thinking` on Chat Completions.
- * pi-ai's `qwen` format sends that boolean from whether a level is selected,
- * and sends `reasoning_effort` only when `supportsReasoningEffort` is set.
- */
-const QWEN_THINKING = new Set(['alibaba', 'alibaba-cn'])
-
-const INPUT_MODALITIES = new Set(['text', 'image'])
 
 const LEVEL_ALIASES = Object.freeze({
   off: 'off',
@@ -331,13 +366,25 @@ function effortsFromCatalogOptions(options, dialect) {
   return { efforts: draft, shape, publishedEffort: shape.effort !== undefined && draft !== undefined && Object.keys(draft).some((level) => level !== 'off' && shape.effort.values.some((value) => levelOf(value)?.level === level)) }
 }
 
-function qwenCompat(provider, parsed) {
-  if (!QWEN_THINKING.has(provider) || !parsed.shape.toggle || parsed.efforts === undefined) return undefined
+/**
+ * Wire dialect for a maker row. Alibaba needs a native toggle line
+ * (`enable_thinking`); DeepSeek / Z.AI attach whenever a thinking map exists.
+ */
+function makerCompat(provider, parsed, native) {
+  if (!dialectEligible(provider, native) || parsed.efforts === undefined) return undefined
+  const rule = MAKER_DIALECT[provider]
+  if (rule === undefined) return undefined
+  if (rule.thinkingFormat === 'qwen' && !parsed.shape.toggle) return undefined
   const compat = {
-    thinkingFormat: 'qwen',
+    thinkingFormat: rule.thinkingFormat,
     supportsReasoningEffort: parsed.publishedEffort,
   }
-  if (parsed.shape.budget) compat.thinkingTokenBudgetField = 'thinking_budget'
+  if (rule.budgetField && parsed.shape.budget) {
+    compat.thinkingTokenBudgetField = rule.budgetField
+  }
+  if (rule.requiresReasoningContentOnAssistantMessages === true) {
+    compat.requiresReasoningContentOnAssistantMessages = true
+  }
   return compat
 }
 
@@ -350,16 +397,17 @@ function catalogInput(modalities) {
   return input.length > 0 ? input : undefined
 }
 
-function capsFromCatalogModel(model, provider) {
+function capsFromCatalogModel(model, provider, native) {
+  const dialect = dialectEligible(provider, native)
   const contextWindow = positiveInt(model?.limit?.context)
   const maxTokens = positiveInt(model?.limit?.output)
-  const parsed = effortsFromCatalogOptions(model?.reasoning_options, QWEN_THINKING.has(provider))
+  const parsed = effortsFromCatalogOptions(model?.reasoning_options, dialect)
   let reasoningEfforts = parsed.efforts
   const thinkingKnown = reasoningEfforts !== undefined || parsed.shape.toggle || model?.reasoning === false
   if (reasoningEfforts === undefined && model?.reasoning === false) reasoningEfforts = false
   const name = label(model?.name)
   const input = catalogInput(model?.modalities?.input)
-  const compat = qwenCompat(provider, parsed)
+  const compat = makerCompat(provider, parsed, native)
   if (contextWindow === undefined && maxTokens === undefined && reasoningEfforts === undefined && !thinkingKnown && name === undefined && input === undefined) {
     return undefined
   }
@@ -386,6 +434,9 @@ function pushRecord(index, bucket, record) {
  * Index a models.dev document by exact id, not by the last path segment.
  * `vendor/glm-5.1` is that vendor's alias; folding it into `glm-5.1` is
  * what let fifty reseller subsets vote the menu down to one shared level.
+ *
+ * A row is native when its family is a modal family on that provider
+ * (tied for the largest count). Hosted minority lines are not native.
  */
 function indexCatalog(body) {
   const index = {}
@@ -404,14 +455,27 @@ function indexCatalog(body) {
       if (family.length === 0) continue
       familySize[family] = (familySize[family] ?? 0) + 1
     }
+    let maxFamilySize = 0
+    for (const size of Object.values(familySize)) {
+      if (size > maxFamilySize) maxFamilySize = size
+    }
     for (const [key, model] of entries) {
-      const caps = capsFromCatalogModel(model, providerId)
-      if (caps === undefined) continue
       const family = typeof model?.family === 'string' ? model.family : ''
+      const size = family.length > 0 ? familySize[family] ?? 0 : 0
+      const native = size > 0 && size === maxFamilySize
+      const caps = capsFromCatalogModel(
+        model !== null && typeof model === 'object' && !Array.isArray(model)
+          ? { ...model, id: typeof model.id === 'string' && model.id.length > 0 ? model.id : key }
+          : model,
+        providerId,
+        native,
+      )
+      if (caps === undefined) continue
       const record = {
         provider: providerId,
         providerSize,
-        familySize: family.length > 0 ? familySize[family] ?? 0 : 1,
+        familySize: size > 0 ? size : 1,
+        native,
         thinkingKnown: caps.thinkingKnown === true,
         ...caps,
       }
@@ -467,16 +531,26 @@ function byConcentration(records) {
   })[0]
 }
 
-/** The trainer when one is present, otherwise the catalog that is mostly this family. */
+/**
+ * Prefer a trainer's own row. Without one, fall back to catalogs where the
+ * family's share is highest, taking effort lists as the mode so one specialty
+ * host cannot dominate. Dialect compat only rides a native maker dialect row
+ * and is stripped on the non-maker fallback.
+ */
 function selectMaker(records) {
   if (records.length === 0) return undefined
   const makers = records.filter((record) => MAKER_PROVIDERS.has(record.provider))
   if (makers.length > 0) return byConcentration(makers)
-  const host = byConcentration(records)
-  const efforts = modeEfforts(records)
+  const natives = records.filter((record) => record.native === true)
+  const pool = natives.length > 0 ? natives : records
+  const host = byConcentration(pool)
   if (host === undefined) return undefined
-  if (efforts === undefined) return host
-  return { ...host, reasoningEfforts: efforts, thinkingKnown: true }
+  const efforts = modeEfforts(pool)
+  const next = efforts === undefined
+    ? { ...host }
+    : { ...host, reasoningEfforts: efforts, thinkingKnown: true }
+  if (next.compat !== undefined) delete next.compat
+  return next
 }
 
 function calendarDate(year, month, day) {
@@ -502,52 +576,114 @@ function datedVersionBase(modelId) {
   return undefined
 }
 
+/**
+ * A dotted minor after `vN` when more name follows: `deepseek-v4.1-flash` →
+ * `deepseek-v4-flash`. Bare `mimo-v2.5` stays (the `.5` is the product id).
+ */
+function minorVersionBase(modelId) {
+  if (typeof modelId !== 'string' || modelId.length === 0) return undefined
+  const match = /^(.*-v\d+)\.\d+(-.+)$/i.exec(modelId)
+  if (match === null) return undefined
+  return `${match[1]}${match[2]}`
+}
+
+/** Peel dated snapshots, then `vN.M-…` minors, one step at a time. */
+function versionBase(modelId) {
+  return datedVersionBase(modelId) ?? minorVersionBase(modelId)
+}
+
+/**
+ * Gateway ids often prefix a trainer id: `ZHIPU/GLM-5.3-FlashX`, `hf:zai-org/…`.
+ * Lookup peels those at query time. The index still stores only unslashed ids.
+ */
+function schemeRest(modelId) {
+  if (typeof modelId !== 'string') return undefined
+  const match = /^([A-Za-z][A-Za-z0-9+-]{0,15}):(.+)$/.exec(modelId)
+  if (match === null) return undefined
+  return match[2].length > 0 ? match[2] : undefined
+}
+
+function pathLeaf(modelId) {
+  if (typeof modelId !== 'string' || !modelId.includes('/')) return undefined
+  const leaf = modelId.slice(modelId.lastIndexOf('/') + 1)
+  return leaf.length > 0 ? leaf : undefined
+}
+
+function lookupCandidates(modelId) {
+  const out = []
+  const seen = new Set()
+  const push = (id) => {
+    if (typeof id !== 'string' || id.length === 0 || seen.has(id)) return
+    seen.add(id)
+    out.push(id)
+  }
+  push(modelId)
+  const rest = schemeRest(modelId)
+  if (rest !== undefined) push(rest)
+  for (const id of [...out]) {
+    const leaf = pathLeaf(id)
+    if (leaf !== undefined) push(leaf)
+  }
+  return out
+}
+
 function recordsAt(catalog, modelId) {
   if (typeof modelId !== 'string' || modelId.length === 0) return []
-  const exact = catalog[modelId]
-  if (exact !== undefined && exact.length > 0) return exact
-  const lower = catalog[modelId.toLowerCase()]
-  return lower ?? []
+  return catalog[modelId.toLowerCase()] ?? []
 }
 
 function catalogRecords(catalog, modelId) {
-  const seen = new Set()
-  let id = modelId
-  while (typeof id === 'string' && id.length > 0 && !seen.has(id)) {
-    seen.add(id)
-    const found = recordsAt(catalog, id)
-    if (found.length > 0) return found
-    const base = datedVersionBase(id)
-    if (base === undefined) return []
-    id = base
+  const out = []
+  const seenProviders = new Set()
+  for (const candidate of lookupCandidates(modelId)) {
+    const seen = new Set()
+    let id = candidate
+    while (typeof id === 'string' && id.length > 0 && !seen.has(id)) {
+      seen.add(id)
+      for (const row of recordsAt(catalog, id)) {
+        if (seenProviders.has(row.provider)) continue
+        seenProviders.add(row.provider)
+        out.push(row)
+      }
+      const base = versionBase(id)
+      if (base === undefined) break
+      id = base
+    }
   }
-  return []
+  return out
 }
 
 function sameModelId(left, right) {
   return typeof left === 'string' && typeof right === 'string' && left.toLowerCase() === right.toLowerCase()
 }
 
-/** Exact listing row wins each field. A dated id with a blank field borrows that field from the undated row. */
+/** Exact listing id wins each field. Alias or dated rows fill only blanks. */
 function listingFor(listed, modelId) {
-  const exact = listed.find((item) => item.id === modelId)
-  let donor
-  const seen = new Set()
-  let id = modelId
-  while (donor === undefined && typeof id === 'string' && !seen.has(id)) {
-    seen.add(id)
-    const base = datedVersionBase(id)
-    if (base === undefined) break
-    donor = listed.find((item) => sameModelId(item.id, base))
-    id = base
+  const rows = []
+  for (const candidate of lookupCandidates(modelId)) {
+    const seen = new Set()
+    let id = candidate
+    while (typeof id === 'string' && id.length > 0 && !seen.has(id)) {
+      seen.add(id)
+      const hit = listed.find((item) => sameModelId(item.id, id))
+      if (hit !== undefined && !rows.includes(hit)) rows.push(hit)
+      const base = versionBase(id)
+      if (base === undefined) break
+      id = base
+    }
   }
-  if (donor === undefined) return exact ?? {}
+  const pick = (field) => {
+    for (const row of rows) {
+      if (row[field] !== undefined) return row[field]
+    }
+    return undefined
+  }
   return {
-    contextWindow: exact?.contextWindow ?? donor.contextWindow,
-    maxTokens: exact?.maxTokens ?? donor.maxTokens,
-    reasoningEfforts: exact?.reasoningEfforts ?? donor.reasoningEfforts,
-    name: exact?.name ?? donor.name,
-    input: exact?.input ?? donor.input,
+    contextWindow: pick('contextWindow'),
+    maxTokens: pick('maxTokens'),
+    reasoningEfforts: pick('reasoningEfforts'),
+    name: pick('name'),
+    input: pick('input'),
   }
 }
 
@@ -577,24 +713,297 @@ function effortsEqual(left, right) {
   return true
 }
 
-function resolveCaps(modelId, listed, catalog) {
-  const fromList = listingFor(listed, modelId)
-  const records = catalogRecords(catalog, modelId)
-  const maker = selectMaker(records)
-  const reasoningEfforts = fromList.reasoningEfforts ?? maker?.reasoningEfforts
-  const compat = fromList.reasoningEfforts !== undefined ? undefined : maker?.compat
+function effortsFromThinkingMap(map) {
+  if (map === null || typeof map !== 'object' || Array.isArray(map)) return undefined
+  const draft = {}
+  for (const level of THINKING_LEVELS) {
+    if (!Object.prototype.hasOwnProperty.call(map, level)) continue
+    const wire = map[level]
+    if (wire === null) {
+      if (level === 'off') draft.off = null
+      continue
+    }
+    if (typeof wire === 'string' && wire.length > 0) draft[level] = wire
+  }
+  return finishEfforts(draft)
+}
+
+function pickOpenAiThinkingCompat(compat) {
+  if (compat === null || typeof compat !== 'object' || Array.isArray(compat)) return undefined
+  const out = {}
+  for (const key of [
+    'thinkingFormat',
+    'supportsReasoningEffort',
+    'thinkingTokenBudgetField',
+    'requiresReasoningContentOnAssistantMessages',
+  ]) {
+    if (compat[key] !== undefined) out[key] = compat[key]
+  }
+  // Custom OpenAI-compatible gateways reject `developer`; pi-ai sends that
+  // role to any reasoning model whose URL looks like OpenAI unless this is false.
+  if (Object.keys(out).length > 0) out.supportsDeveloperRole = false
+  return Object.keys(out).length > 0 ? out : undefined
+}
+
+/** Per-key merge: primary wins, fallback fills blanks (builtin over models.dev). */
+function mergeCompat(primary, fallback) {
+  if (primary === undefined) return fallback
+  if (fallback === undefined) return primary
+  return { ...fallback, ...primary }
+}
+
+/** OpenAI custom routes: thinking models must keep the system role. */
+function guardOpenAiGateway(caps, routeApi) {
+  if (!OPENAI_APIS.has(routeApi)) return caps
+  const thinks = caps.reasoningEfforts !== undefined && caps.reasoningEfforts !== false
+  const hasWire = caps.compat !== undefined
+  if (!thinks && !hasWire) return caps
   return {
-    contextWindow: fromList.contextWindow ?? maker?.contextWindow,
-    maxTokens: fromList.maxTokens ?? maker?.maxTokens,
-    reasoningEfforts,
-    effortsKnown: fromList.reasoningEfforts !== undefined || maker?.thinkingKnown === true,
-    ...fromList.name !== undefined || maker?.name !== undefined ? { name: fromList.name ?? maker?.name } : {},
-    ...fromList.input !== undefined || maker?.input !== undefined ? { input: fromList.input ?? maker?.input } : {},
-    ...compat === undefined ? {} : { compat },
+    ...caps,
+    compat: { ...(caps.compat ?? {}), supportsDeveloperRole: false },
   }
 }
 
-function applyCaps(model, caps) {
+function builtinInput(input) {
+  if (!Array.isArray(input)) return undefined
+  const next = input.filter((modality) => INPUT_MODALITIES.has(modality))
+  return next.length > 0 ? next : undefined
+}
+
+/**
+ * Index pi-ai builtin model objects (or plain fixtures) by normalized id.
+ * Does not store baseUrl — custom routes keep their own endpoint.
+ */
+function indexBuiltins(models) {
+  const index = {}
+  if (!Array.isArray(models)) return index
+  for (const model of models) {
+    if (model === null || typeof model !== 'object' || Array.isArray(model)) continue
+    const id = label(model.id)
+    if (id === undefined) continue
+    const api = label(model.api)
+    if (api === undefined || !LISTABLE_APIS.has(api)) continue
+    const provider = label(model.provider) ?? ''
+    const record = {
+      provider,
+      api,
+      contextWindow: positiveInt(model.contextWindow),
+      maxTokens: positiveInt(model.maxTokens),
+      name: label(model.name),
+      input: builtinInput(model.input),
+      reasoning: model.reasoning,
+      thinkingLevelMap: model.thinkingLevelMap !== null && typeof model.thinkingLevelMap === 'object'
+        ? model.thinkingLevelMap
+        : undefined,
+      compat: model.compat !== null && typeof model.compat === 'object' && !Array.isArray(model.compat)
+        ? model.compat
+        : undefined,
+    }
+    pushRecord(index, id.toLowerCase(), record)
+  }
+  return index
+}
+
+function builtinRecords(builtins, modelId) {
+  const out = []
+  const seenKey = new Set()
+  for (const candidate of lookupCandidates(modelId)) {
+    const seen = new Set()
+    let id = candidate
+    while (typeof id === 'string' && id.length > 0 && !seen.has(id)) {
+      seen.add(id)
+      for (const row of recordsAt(builtins, id)) {
+        const key = `${row.provider}\0${row.api}`
+        if (seenKey.has(key)) continue
+        seenKey.add(key)
+        out.push(row)
+      }
+      const base = versionBase(id)
+      if (base === undefined) break
+      id = base
+    }
+  }
+  return out
+}
+
+/** Same-api hits first, then maker providers, then any remaining hit. */
+function selectBuiltin(records, routeApi) {
+  if (!Array.isArray(records) || records.length === 0) return undefined
+  const same = typeof routeApi === 'string'
+    ? records.filter((record) => record.api === routeApi)
+    : []
+  const pool = same.length > 0 ? same : records
+  const makers = pool.filter((record) => MAKER_PROVIDERS.has(record.provider))
+  const prefer = makers.length > 0 ? makers : pool
+  return [...prefer].sort((left, right) => {
+    if (left.provider.length !== right.provider.length) return left.provider.length - right.provider.length
+    return left.provider < right.provider ? -1 : 1
+  })[0]
+}
+
+/**
+ * Project one builtin row onto the custom route's api (DESIGN.md §3).
+ * OpenAI is the default track; Anthropic rows project onto OpenAI via thinking.type.
+ */
+function projectBuiltin(record, routeApi) {
+  if (record === undefined || typeof routeApi !== 'string') return undefined
+  const contextWindow = record.contextWindow
+  const maxTokens = record.maxTokens
+  const name = record.name
+  const input = record.input
+  const fromMap = effortsFromThinkingMap(record.thinkingLevelMap)
+  let reasoningEfforts
+  let compat
+  let thinkingKnown = false
+
+  if (record.reasoning === false) {
+    reasoningEfforts = false
+    thinkingKnown = true
+  } else if (OPENAI_APIS.has(routeApi)) {
+    if (OPENAI_APIS.has(record.api)) {
+      compat = pickOpenAiThinkingCompat(record.compat)
+      reasoningEfforts = fromMap
+      if (reasoningEfforts === undefined && record.reasoning === true && compat?.thinkingFormat !== undefined
+        && compat.supportsReasoningEffort === false) {
+        reasoningEfforts = { ...TOGGLE_EFFORTS }
+      }
+      thinkingKnown = reasoningEfforts !== undefined || record.reasoning === true
+    } else if (record.api === 'anthropic-messages' && record.reasoning === true) {
+      // Menu + sizes only. Do not invent a Completions thinkingFormat:
+      // pi-ai's `deepseek` dialect sends thinking.type=enabled/disabled, but
+      // adaptive-native Anthropic rows (and some OpenAI gateways that mirror
+      // them) only accept adaptive/disabled — which the Completions transport
+      // cannot emit. Fabricating deepseek is a wrong cross-protocol guess.
+      reasoningEfforts = fromMap ?? { ...TOGGLE_EFFORTS }
+      thinkingKnown = true
+    }
+  } else if (routeApi === 'anthropic-messages') {
+    if (record.api === 'anthropic-messages' && record.reasoning === true) {
+      reasoningEfforts = fromMap ?? { ...ANTHROPIC_DEFAULT_EFFORTS }
+      thinkingKnown = true
+      if (record.compat?.forceAdaptiveThinking === true) {
+        compat = { forceAdaptiveThinking: true }
+      }
+    } else if (OPENAI_APIS.has(record.api) && record.reasoning === true) {
+      reasoningEfforts = fromMap ?? { ...ANTHROPIC_DEFAULT_EFFORTS }
+      thinkingKnown = true
+    }
+  }
+
+  if (contextWindow === undefined && maxTokens === undefined && reasoningEfforts === undefined
+    && !thinkingKnown && name === undefined && input === undefined && compat === undefined) {
+    return undefined
+  }
+  return {
+    ...contextWindow === undefined ? {} : { contextWindow },
+    ...maxTokens === undefined ? {} : { maxTokens },
+    ...reasoningEfforts === undefined ? {} : { reasoningEfforts },
+    ...name === undefined ? {} : { name },
+    ...input === undefined ? {} : { input },
+    ...compat === undefined ? {} : { compat },
+    thinkingKnown,
+  }
+}
+
+/** True when a projection already carries a usable thinking menu or wire. */
+function hasThinkingProjection(projected) {
+  if (projected === undefined) return false
+  if (projected.compat?.thinkingFormat !== undefined) return true
+  return projected.reasoningEfforts !== undefined && projected.reasoningEfforts !== false
+}
+
+/** Completions thinkingFormat is gateway dialect — only trust maker OpenAI rows. */
+function hasMakerThinkingWire(row, routeApi) {
+  if (!MAKER_PROVIDERS.has(row.provider)) return false
+  const projected = projectBuiltin(row, routeApi)
+  return projected?.compat?.thinkingFormat !== undefined
+}
+
+/**
+ * Same-api hits may be weak resellers (reasoning:true, no wire). Overlay a
+ * maker Completions thinkingFormat when one exists. Never invent a wire from
+ * Anthropic projection alone (adaptive vs enabled are different dialects).
+ * Menu-only fill copies efforts without a thinkingFormat.
+ */
+function overlayThinking(primary, hits, routeApi) {
+  if (primary === undefined) return primary
+  let next = primary
+  if (next.compat?.thinkingFormat === undefined) {
+    const wired = hits.filter((row) => hasMakerThinkingWire(row, routeApi))
+    const projected = projectBuiltin(selectBuiltin(wired, routeApi), routeApi)
+    if (projected?.compat?.thinkingFormat !== undefined) {
+      next = {
+        ...next,
+        ...projected.reasoningEfforts !== undefined ? { reasoningEfforts: projected.reasoningEfforts } : {},
+        compat: mergeCompat(projected.compat, next.compat),
+        thinkingKnown: next.thinkingKnown === true || projected.thinkingKnown === true,
+      }
+    }
+  }
+  if (next.reasoningEfforts === undefined) {
+    const menus = hits.filter((row) => {
+      const projected = projectBuiltin(row, routeApi)
+      return projected?.reasoningEfforts !== undefined && projected.reasoningEfforts !== false
+    })
+    const projected = projectBuiltin(selectBuiltin(menus, routeApi), routeApi)
+    if (projected?.reasoningEfforts !== undefined && projected.reasoningEfforts !== false) {
+      next = {
+        ...next,
+        reasoningEfforts: projected.reasoningEfforts,
+        thinkingKnown: next.thinkingKnown === true || projected.thinkingKnown === true,
+      }
+    }
+  }
+  return next
+}
+
+function resolveCaps(modelId, listed, catalog, builtins, routeApi) {
+  const api = routeApi ?? 'openai-completions'
+  const fromList = listingFor(listed, modelId)
+  const hits = builtinRecords(builtins ?? {}, modelId)
+  let builtin = projectBuiltin(selectBuiltin(hits, api), api)
+  if (OPENAI_APIS.has(api)) builtin = overlayThinking(builtin, hits, api)
+  const maker = selectMaker(catalogRecords(catalog, modelId))
+  let reasoningEfforts = fromList.reasoningEfforts ?? builtin?.reasoningEfforts ?? maker?.reasoningEfforts
+  const compat = mergeCompat(builtin?.compat, maker?.compat)
+  // A thinking wire without a menu is not usable in chat; invent off+one on-level.
+  if (
+    reasoningEfforts === undefined
+    && compat?.thinkingFormat !== undefined
+    && (builtin?.thinkingKnown === true || maker?.thinkingKnown === true)
+    && compat.supportsReasoningEffort !== true
+  ) {
+    reasoningEfforts = { ...TOGGLE_EFFORTS }
+  }
+  return guardOpenAiGateway({
+    contextWindow: fromList.contextWindow ?? builtin?.contextWindow ?? maker?.contextWindow,
+    maxTokens: fromList.maxTokens ?? builtin?.maxTokens ?? maker?.maxTokens,
+    reasoningEfforts,
+    effortsKnown: fromList.reasoningEfforts !== undefined
+      || builtin?.thinkingKnown === true
+      || maker?.thinkingKnown === true
+      || reasoningEfforts !== undefined,
+    ...fromList.name !== undefined || builtin?.name !== undefined || maker?.name !== undefined
+      ? { name: fromList.name ?? builtin?.name ?? maker?.name }
+      : {},
+    ...fromList.input !== undefined || builtin?.input !== undefined || maker?.input !== undefined
+      ? { input: fromList.input ?? builtin?.input ?? maker?.input }
+      : {},
+    ...compat === undefined ? {} : { compat },
+  }, api)
+}
+
+/** A `compat` block that only carries auto-filled thinking / gateway fields. */
+function catalogDialect(compat) {
+  if (compat === null || typeof compat !== 'object' || Array.isArray(compat)) return false
+  const keys = Object.keys(compat)
+  if (keys.length === 0) return false
+  if (!keys.every((key) => AUTO_COMPAT_KEYS.has(key))) return false
+  if (compat.thinkingFormat !== undefined && !AUTO_THINKING_FORMATS.has(compat.thinkingFormat)) return false
+  return true
+}
+
+function applyCaps(model, caps, routeApi) {
   if (model === null || typeof model !== 'object' || Array.isArray(model)) return model
   const next = { ...model }
   let changed = false
@@ -615,7 +1024,8 @@ function applyCaps(model, caps) {
     next.input = caps.input
     changed = true
   }
-  const refresh = model.compat === undefined && catalogShaped(model.reasoningEfforts)
+  const refresh = (model.compat === undefined || catalogDialect(model.compat))
+    && catalogShaped(model.reasoningEfforts)
   if (model.reasoningEfforts === undefined && caps.reasoningEfforts !== undefined) {
     next.reasoningEfforts = caps.reasoningEfforts
     changed = true
@@ -624,9 +1034,33 @@ function applyCaps(model, caps) {
     else next.reasoningEfforts = caps.reasoningEfforts
     changed = true
   }
-  const wroteEfforts = model.reasoningEfforts === undefined && next.reasoningEfforts !== undefined
-  if (model.compat === undefined && caps.compat !== undefined && (wroteEfforts || refresh)) {
-    next.compat = caps.compat
+  // Auto compat (incl. supportsDeveloperRole) may refresh even when efforts already match.
+  // Do not strip auto compat when sources are unknown (catalog/listing down).
+  if (model.compat === undefined || catalogDialect(model.compat)) {
+    if (caps.compat !== undefined) {
+      if (JSON.stringify(next.compat) !== JSON.stringify(caps.compat)) {
+        next.compat = caps.compat
+        changed = true
+      }
+    } else if (
+      catalogDialect(model.compat)
+      && caps.effortsKnown
+      && (caps.reasoningEfforts === false || caps.reasoningEfforts === undefined)
+    ) {
+      delete next.compat
+      changed = true
+    }
+  }
+  // Existing thinking menus on OpenAI custom routes still need the gateway guard,
+  // even when resolveCaps has nothing new from listing/catalog/builtins.
+  if (
+    OPENAI_APIS.has(routeApi)
+    && next.reasoningEfforts !== undefined
+    && next.reasoningEfforts !== false
+    && (next.compat === undefined || catalogDialect(next.compat))
+    && next.compat?.supportsDeveloperRole !== false
+  ) {
+    next.compat = { ...(next.compat ?? {}), supportsDeveloperRole: false }
     changed = true
   }
   return changed ? next : model
@@ -637,7 +1071,7 @@ function applyCaps(model, caps) {
  * Hand-written fields stay. Routes the installed catalog already describes
  * (no `api`) are left alone. Returns no op when nothing was blank.
  */
-function planMutations(section, listings, catalog) {
+function planMutations(section, listings, catalog, builtins) {
   const providers = section?.providers
   if (providers === null || typeof providers !== 'object' || Array.isArray(providers)) {
     return { ops: [], filled: {} }
@@ -650,7 +1084,7 @@ function planMutations(section, listings, catalog) {
     let count = 0
     const models = profile.models.map((model) => {
       if (typeof model?.id !== 'string') return model
-      const next = applyCaps(model, resolveCaps(model.id, listed, catalog))
+      const next = applyCaps(model, resolveCaps(model.id, listed, catalog, builtins, profile.api), profile.api)
       if (next !== model) count += 1
       return next
     })
@@ -673,11 +1107,14 @@ export {
   applyCaps,
   customRoutes,
   gapSignature,
+  indexBuiltins,
   indexCatalog,
   isCustomProvider,
   listingHeaders,
   listingUrl,
   planMutations,
+  projectBuiltin,
   readListing,
   resolveCaps,
+  selectBuiltin,
 }

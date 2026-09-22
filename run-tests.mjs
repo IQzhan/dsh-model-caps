@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 
 const SUITES = [
   ['test-core.mjs', 'policy: listings, catalog agreement, settings ops'],
+  ['test-design.mjs', 'design: pipeline, projection, merge priority'],
   ['test-sync.mjs', 'sync: credentials, listing failure, no second write'],
   ['test-host.mjs', 'adapter: apply return, route, one fill'],
   ['test-package.mjs', 'package: both loaders'],

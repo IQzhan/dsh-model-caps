@@ -12,7 +12,7 @@ function shippedFiles() {
   const named = [
     'dsh-model-caps-core.js', 'dsh-model-caps-sync.js', 'dsh-model-caps.host.js',
     'dsh-model-caps.client.js', 'build-model-caps.mjs', 'run-tests.mjs',
-    'package.json', 'README.md', 'README.zh.md', 'LICENSE', 'test-support.mjs',
+    'package.json', 'README.md', 'README.zh.md', 'DESIGN.md', 'DESIGN.zh.md', 'LICENSE', 'test-support.mjs',
   ]
   const missing = named.filter((name) => !existsSync(join(ROOT, name)))
   check('every named file is actually there', missing, [])
@@ -81,6 +81,10 @@ const runtime = [
 ].join('\n')
 check('runtime never shells out to powershell / schtasks / taskkill',
   /powershell|pwsh|schtasks|taskkill/i.test(runtime), false)
+check('runtime does not read OS proxy settings or invent a tunnel',
+  /HTTPS_PROXY|HTTP_PROXY|NO_PROXY|ALL_PROXY|WinINET|Internet Settings|ProxyEnable|ProxyServer|fetchViaConnect|\bCONNECT\b/.test(runtime), false)
+check('runtime does not branch on process.platform',
+  /process\.platform/.test(runtime), false)
 
 const failed = results.filter((result) => !result.ok)
 for (const result of results) {

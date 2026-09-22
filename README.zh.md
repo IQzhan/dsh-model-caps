@@ -4,7 +4,7 @@
 
 一个轻量的 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 插件。它给**自定义供应商**补上空白的上下文窗口、输出上限和思考等级，这样在对话里选模型时，就和内置供应商一样，不用再去 `settings.yaml` 里手写这三项。已经写过的值会保留。不会增删模型。
 
-7 个套件。运行 `node verify.mjs`。
+8 个套件。运行 `node verify.mjs`。
 
 ## 它写什么
 

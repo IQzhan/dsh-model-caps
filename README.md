@@ -2,22 +2,25 @@
 
 [中文](README.zh.md) · **English**
 
-A small [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin. For each **custom provider** it fills blank context windows, output caps, and thinking levels, so the chat model menu can offer them the way it offers a built-in provider. Values you already wrote stay. Models are not added or removed.
+A small [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) plugin. For each **custom provider** it fills blank context windows, output caps, thinking levels, and thinking wire `compat`, so the chat model menu can offer them the way it offers a built-in provider. Values you already wrote stay. Models are not added or removed.
 
-7 suites. Run `node verify.mjs`.
+**Design:** [DESIGN.md](DESIGN.md) (source of truth). OpenAI-compatible is the default track; Anthropic is an optional user choice. One custom route has one `api`.
+
+8 suites. Run `node verify.mjs`.
 
 ## What it writes
 
-A custom provider is a `llm-pi-ai` route that has `api`, `baseURL`, and at least one model. Catalog routes such as `openai` or `google` are left alone; their installed catalog already carries these fields.
+A custom provider is a `llm-pi-ai` route that has `api`, `baseURL`, and at least one model. Catalog routes such as `openai` or `google` are left alone.
 
-For each model on that route, a blank field is filled from:
+Per field, blanks merge in this order (see [DESIGN.md](DESIGN.md) §5):
 
-1. The provider's own `GET {baseURL}/models` listing, when it actually publishes the number or the thinking levels.
-2. Otherwise [models.dev](https://models.dev/api.json), using the **maker's** record (OpenAI, Z.AI, Alibaba, DeepSeek, and the other trainers). An id with no row of its own falls back through a trailing calendar date (`-`, `_`, `:`, or `@`, as `YYYY-MM-DD` or `YYYYMMDD`) to that undated id. An exact catalog id still wins, including its own context and output. `preview`, `exp`, and `-v2` are not versions. Reseller copies of one id disagree, and intersecting them collapses the menu to the one level every copy repeated.
+1. The provider's own `GET {baseURL}/models` listing (sizes / levels it publishes).
+2. **pi-ai builtins** (when available): match by normalized id, prefer the same `api`, else a maker row; **project** onto the route protocol. OpenAI routes may overlay a **maker** Completions `thinkingFormat`; Anthropic-only hits supply a menu, not a fabricated `deepseek` wire (Completions cannot emit `adaptive`).
+3. [models.dev](https://models.dev/api.json) maker rows for remaining gaps (thin dialect fallback when no builtin hit).
 
-`off` is written into the same `reasoningEfforts` map as the other levels when the maker publishes a toggle or an `none` value. A toggle with no effort list is `off` plus one on-level, and only for the Alibaba Chat Completions dialect (`thinkingFormat: qwen`, `enable_thinking`). Any other toggle is left unset rather than given invented levels. A maker that publishes neither a toggle nor an effort list does not get a thinking map.
+Id lookup: exact → drop `scheme:` / path leaf → peel a trailing calendar date → peel `vN.M` when more name follows (`deepseek-v4.1-flash` → `deepseek-v4-flash`; bare `mimo-v2.5` stays). `FlashX` and `Flash` stay distinct.
 
-`contextWindow`, `maxTokens`, blank `name`, blank `input` (`text` / `image` only), `reasoningEfforts`, and that dialect's `compat` are the fields written. A model with `compat`, a `reasoningEfforts: false` you set yourself, and any effort wire that is not a standard level name (for example `no_think`) stay. A map that only repeats catalog level names and has no `compat` block is refreshed from the maker, because that shape is what an earlier fill wrote. Route-level thinking budgets are not written. Requests use `HTTPS_PROXY` when it is set, and otherwise the operating-system proxy.
+`contextWindow`, `maxTokens`, blank `name`, blank `input` (`text` / `image`), `reasoningEfforts`, and auto `compat` are written. Hand-written `compat`, `reasoningEfforts: false`, and non-standard effort wires stay. Catalog-shaped auto fills may refresh. Route-level thinking budgets are not written.
 
 ## Install
 

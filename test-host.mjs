@@ -119,10 +119,16 @@ while (fetches === beforeSave && Date.now() < deadline) {
   await new Promise((resolve) => setTimeout(resolve, 10))
 }
 check('saving the provider syncs again', fetches > beforeSave, true)
-await new Promise((resolve) => setTimeout(resolve, 80))
-const afterSave = fetches
-await new Promise((resolve) => setTimeout(resolve, 80))
-check('the plugin write does not sync again', fetches, afterSave)
+let stable = fetches
+for (let i = 0; i < 8; i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 25))
+  if (fetches !== stable) {
+    stable = fetches
+    i = 0
+  }
+}
+check('the plugin write does not sync again', fetches, stable)
+check('a save reuses the listing and the catalog once each', fetches - beforeSave, 2)
 
 globalThis.fetch = previousFetch
 
